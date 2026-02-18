@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Scoreboard Test</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; }
+    .row { display: flex; gap: 18px; align-items: center; margin: 10px 0; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; max-width: 860px; }
+    .big { font-size: 44px; font-weight: 700; letter-spacing: 0.5px; }
+    .mid { font-size: 20px; font-weight: 600; }
+    .muted { color: #666; }
+    .pill { display: inline-block; padding: 4px 10px; border-radius: 999px; border: 1px solid #ddd; }
+    .pen { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  </style>
+</head>
+<body>
+  <h1>Scoreboard Test (Simulator / Live)</h1>
+  <div class="card">
+    <div class="row">
+      <div class="big" id="clock">--:--</div>
+      <div class="pill" id="period">PER -</div>
+      <div class="pill" id="running">stopped</div>
+      <div class="pill" id="horn">horn: off</div>
+    </div>
+
+    <div class="grid">
+      <div>
+        <div class="mid" id="homeName">HOME</div>
+        <div class="big" id="homeScore">0</div>
+        <div class="muted">Penalties: <span class="pen" id="homePens">----</span></div>
+      </div>
+      <div>
+        <div class="mid" id="awayName">AWAY</div>
+        <div class="big" id="awayScore">0</div>
+        <div class="muted">Penalties: <span class="pen" id="awayPens">----</span></div>
+      </div>
+    </div>
+
+    <hr />
+
+    <div class="mid">Pause / Summary (old logic)</div>
+    <div class="row">
+      <div class="pill" id="sumTop">-</div>
+      <div class="pill" id="sumBottom">-</div>
+      <div class="pill" id="sumMain">-</div>
+    </div>
+
+    <div class="muted" id="meta"></div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
