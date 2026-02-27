@@ -48,7 +48,7 @@ UNIHOCKEY_GAME_API_BASE = "https://www.unihockey.live/api/game"
 UNIHOCKEY_HTTP_TIMEOUT = 10
 
 # OBS (websocket v5)
-OBS_HOST = "192.168.10.99"
+OBS_HOST = "192.168.10.43"
 OBS_PORT = 4455
 OBS_PASSWORD = ""
 OBS_SCENE = "Game"
