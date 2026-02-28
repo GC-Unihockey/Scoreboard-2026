@@ -35,7 +35,7 @@ CSV_SEPARATOR = ";"  # can be "," or ";"
 LEAD_MINUTES = 20
 DURATION_MINUTES = 200
 
-# Reload CSV only when OBS is idle
+# Reload CSV only when OBS is idle (unless OBS is down/unreachable)
 CSV_RELOAD_IDLE_EVERY_SECONDS = 5 * 60
 
 # Loop / logging
@@ -48,7 +48,7 @@ UNIHOCKEY_GAME_API_BASE = "https://www.unihockey.live/api/game"
 UNIHOCKEY_HTTP_TIMEOUT = 10
 
 # OBS (websocket v5)
-OBS_HOST = "192.168.10.43"
+OBS_HOST = "192.168.10.208"  # Change to Unattended System on big System
 OBS_PORT = 4455
 OBS_PASSWORD = ""
 OBS_SCENE = "Game"
@@ -321,28 +321,22 @@ class OBSController:
         self.client.stop_record()
 
 
-def connect_obs_with_retry() -> OBSController:
+def try_connect_obs() -> Optional[OBSController]:
     """
-    Connect to OBS. If not reachable, log and retry after 10 minutes.
+    Try connecting to OBS once. Return OBSController if OK, else None.
+    Non-blocking (no long sleep here).
     """
-    while True:
-        try:
-            log.info("Connecting to OBS %s:%s ...", OBS_HOST, OBS_PORT)
-            obsctl = OBSController()
-            obsctl.get_status()  # test call
-            log.info("OBS connection established")
-            log.info("")
-            return obsctl
-        except Exception as e:
-            log.error(
-                "OBS host %s:%s not reachable (%s). Retrying in %d minutes.",
-                OBS_HOST,
-                OBS_PORT,
-                e,
-                OBS_RETRY_SECONDS // 60,
-            )
-            log.info("")
-            time.sleep(OBS_RETRY_SECONDS)
+    try:
+        log.info("Connecting to OBS %s:%s ...", OBS_HOST, OBS_PORT)
+        obsctl = OBSController()
+        obsctl.get_status()  # test call
+        log.info("OBS connection established")
+        log.info("")
+        return obsctl
+    except Exception as e:
+        log.warning("OBS not reachable (%s). Will retry later.", e)
+        log.info("")
+        return None
 
 
 def wait_for_obs_output(
@@ -447,10 +441,12 @@ def main():
         OBS_PORT,
         OBS_SCENE,
     )
-    log.info("NOTE: Game_List_Today updates only after CSV is loaded (CSV loads only when OBS is idle).")
+    log.info("NOTE: Script runs even if OBS is down; Companion will still be updated.")
+    log.info("NOTE: CSV reload is allowed when OBS is down; when OBS is up it reloads only when OBS is idle.")
     log.info("")
 
-    obsctl = connect_obs_with_retry()
+    obsctl: Optional[OBSController] = None
+    last_obs_connect_try = 0.0  # epoch seconds
 
     plans: List[GamePlan] = []
     last_csv_reload = 0.0
@@ -491,25 +487,35 @@ def main():
             last_seen_local_date = now.date()
             last_sent_game_list_today = None
 
-        # OBS status
-        try:
-            is_streaming, is_recording = obsctl.get_status()
-        except Exception as e:
-            log.error(
-                "OBS host %s:%s not reachable (%s). Retrying in %d minutes.",
-                OBS_HOST,
-                OBS_PORT,
-                e,
-                OBS_RETRY_SECONDS // 60,
-            )
-            log.info("")
-            time.sleep(OBS_RETRY_SECONDS)
-            obsctl = connect_obs_with_retry()
-            last_is_streaming = None
-            last_is_recording = None
-            continue
+        # -------------------------
+        # OBS connect/reconnect (NON-BLOCKING)
+        # -------------------------
+        if obsctl is None:
+            if (time.time() - last_obs_connect_try) >= OBS_RETRY_SECONDS or last_obs_connect_try == 0.0:
+                last_obs_connect_try = time.time()
+                obsctl = try_connect_obs()
+                if obsctl is None:
+                    # Treat OBS as down; keep running Companion/CSV logic
+                    is_streaming, is_recording = False, False
+                else:
+                    # On fresh connect, force output log
+                    last_is_streaming = None
+                    last_is_recording = None
+                    is_streaming, is_recording = obsctl.get_status()
+            else:
+                is_streaming, is_recording = False, False
+        else:
+            try:
+                is_streaming, is_recording = obsctl.get_status()
+            except Exception as e:
+                log.error("OBS connection lost (%s). Will retry in %d minutes.", e, OBS_RETRY_SECONDS // 60)
+                log.info("")
+                obsctl = None
+                last_is_streaming = None
+                last_is_recording = None
+                is_streaming, is_recording = False, False
 
-        # OBS output state log
+        # OBS output state log (only meaningful when connected; harmless otherwise)
         if last_is_streaming is None or last_is_recording is None:
             last_is_streaming, last_is_recording = is_streaming, is_recording
             log.info("OBS outputs: streaming=%s recording=%s", onoff(is_streaming), onoff(is_recording))
@@ -521,7 +527,11 @@ def main():
 
         obs_idle = (not is_streaming) and (not is_recording)
 
-        # CSV reload when idle
+        # -------------------------
+        # CSV reload
+        # - Always allow reload if OBS is NOT connected (so Companion stays fresh)
+        # - If OBS is connected, keep the "only when idle" behavior
+        # -------------------------
         try:
             p = Path(STREAM_PLANNING_FILE)
             mtime = p.stat().st_mtime if p.exists() else 0.0
@@ -529,8 +539,9 @@ def main():
             mtime = 0.0
 
         csv_reloaded_this_loop = False
+        allow_csv_reload = (obsctl is None) or obs_idle
 
-        if obs_idle:
+        if allow_csv_reload:
             due_time = (time.time() - last_csv_reload) >= CSV_RELOAD_IDLE_EVERY_SECONDS
             due_mtime = (mtime != 0.0 and mtime != last_csv_mtime)
             if due_time or due_mtime or not plans:
@@ -547,7 +558,9 @@ def main():
                     log.error("CSV load failed: %s", e)
                     log.info("")
 
+        # -------------------------
         # Update Game_List_Today after CSV load (or day-change forced resend)
+        # -------------------------
         if plans and (csv_reloaded_this_loop or last_sent_game_list_today is None):
             today_value = build_game_list_today_value(plans, now.date())
 
@@ -569,7 +582,9 @@ def main():
                 log.info("$(custom:%s) unchanged -> no update sent", COMPANION_VAR_GAME_LIST_TODAY)
                 log.info("")
 
+        # -------------------------
         # Companion flags
+        # -------------------------
         stream_auto, record_auto, companion_ok, companion_err = companion_get_flags_and_health()
 
         if _last_companion_ok is None or companion_ok != _last_companion_ok or (
@@ -602,7 +617,9 @@ def main():
             )
             log.info("")
 
+        # -------------------------
         # Active plan
+        # -------------------------
         active = find_active_plan(plans, now) if plans else None
 
         current_active_game_id = active.game_id if active else None
@@ -628,14 +645,16 @@ def main():
                 log_upcoming(plans, now, UPCOMING_LIST_COUNT)
                 log.info("")
 
-        # Scheduled stop
+        # -------------------------
+        # Scheduled stop (only if OBS connected)
+        # -------------------------
         if (
             active
             and controlled_game_id == active.game_id
             and now >= active.stop_time
             and stop_enforced_for_game_id != active.game_id
         ):
-            if is_streaming or is_recording:
+            if obsctl is not None and (is_streaming or is_recording):
                 log.info("STOP TIME reached for Game_ID=%s -> stopping stream+record", active.game_id)
                 try:
                     if is_streaming:
@@ -657,7 +676,9 @@ def main():
                 log.info("")
             stop_enforced_for_game_id = active.game_id
 
-        # Early stop FINISHED
+        # -------------------------
+        # Early stop FINISHED (only if OBS connected)
+        # -------------------------
         if (
             active
             and controlled_game_id == active.game_id
@@ -707,28 +728,31 @@ def main():
                         active.game_id,
                         fmt_dt(active.stop_time),
                     )
-                    try:
-                        if is_streaming:
-                            obsctl.stop_stream()
-                        if is_recording:
-                            obsctl.stop_record()
-                        is_streaming, is_recording = wait_for_obs_output(
-                            obsctl,
-                            want_streaming=False if is_streaming else None,
-                            want_recording=False if is_recording else None,
-                        )
-                        log.info(
-                            "OBS outputs stopped (early stop, verified): streaming=%s recording=%s",
-                            onoff(is_streaming),
-                            onoff(is_recording),
-                        )
-                    except Exception as e:
-                        log.error("Failed early stop of OBS outputs: %s", e)
-                    log.info("")
+                    if obsctl is not None:
+                        try:
+                            if is_streaming:
+                                obsctl.stop_stream()
+                            if is_recording:
+                                obsctl.stop_record()
+                            is_streaming, is_recording = wait_for_obs_output(
+                                obsctl,
+                                want_streaming=False if is_streaming else None,
+                                want_recording=False if is_recording else None,
+                            )
+                            log.info(
+                                "OBS outputs stopped (early stop, verified): streaming=%s recording=%s",
+                                onoff(is_streaming),
+                                onoff(is_recording),
+                            )
+                        except Exception as e:
+                            log.error("Failed early stop of OBS outputs: %s", e)
+                        log.info("")
                     early_stop_done_for_game_id = active.game_id
 
-        # Start logic
-        if active:
+        # -------------------------
+        # Start logic (only if OBS connected)
+        # -------------------------
+        if active and obsctl is not None:
             try:
                 obsctl.set_scene(OBS_SCENE)
             except Exception as e:
@@ -767,7 +791,9 @@ def main():
                         log.info("  Calling start_stream() ...")
                         obsctl.start_stream()
 
-                        is_streaming2, is_recording2 = wait_for_obs_output(obsctl, want_streaming=True, want_recording=None)
+                        is_streaming2, is_recording2 = wait_for_obs_output(
+                            obsctl, want_streaming=True, want_recording=None
+                        )
                         if is_streaming2:
                             log.info(
                                 "  Streaming started (verified). streaming=%s recording=%s",
@@ -807,7 +833,9 @@ def main():
                     log.info("  Calling start_record() ...")
                     obsctl.start_record()
 
-                    is_streaming2, is_recording2 = wait_for_obs_output(obsctl, want_streaming=None, want_recording=True)
+                    is_streaming2, is_recording2 = wait_for_obs_output(
+                        obsctl, want_streaming=None, want_recording=True
+                    )
                     if is_recording2:
                         log.info(
                             "  Recording started (verified). streaming=%s recording=%s",
