@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=administrator
 Group=administrator
-StartupDelaySec=5s
+#ExecStartPre=/bin/sleep 10
 WorkingDirectory=/opt/scoreboard/OBS_unattend_autostream_service
 ExecStart=/usr/bin/python3 /opt/scoreboard/OBS_unattend_autostream_service/auto_stream.py
 

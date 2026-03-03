@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-StartupDelaySec=5s
+#ExecStartPre=/bin/sleep 10
 WorkingDirectory=/opt/scoreboard/Update_Streamdata_Service
 
 # CHANGE THIS PATH IF NEEDED
