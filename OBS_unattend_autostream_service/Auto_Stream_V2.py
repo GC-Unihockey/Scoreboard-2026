@@ -32,14 +32,14 @@ STREAM_PLANNING_FILE = "/mnt/One_Drive/01_GC_Streaming_Sharing/Stream_Planning.c
 CSV_SEPARATOR = ";"  # can be "," or ";"
 
 # Timing (minutes)
-LEAD_MINUTES = 20
-DURATION_MINUTES = 200
+LEAD_MINUTES = 25 #25
+DURATION_MINUTES = 180 #150
 
-# Reload CSV only when OBS is idle
+# Reload CSV only when OBS is idle (unless OBS is down/unreachable)
 CSV_RELOAD_IDLE_EVERY_SECONDS = 5 * 60
 
 # Loop / logging
-MAIN_LOOP_SECONDS = 10
+MAIN_LOOP_SECONDS = 30
 UPCOMING_LIST_COUNT = 5
 
 # Check game status every 5 minutes to early-stop if FINISHED
@@ -48,7 +48,7 @@ UNIHOCKEY_GAME_API_BASE = "https://www.unihockey.live/api/game"
 UNIHOCKEY_HTTP_TIMEOUT = 10
 
 # OBS (websocket v5)
-OBS_HOST = "192.168.10.43"
+OBS_HOST = "192.168.10.208"
 OBS_PORT = 4455
 OBS_PASSWORD = ""
 OBS_SCENE = "Game"
@@ -63,8 +63,8 @@ WAIT_AFTER_SET_RTMP_SECONDS = 2.0
 HTTP_CONNECT_TIMEOUT = 0.7
 HTTP_READ_TIMEOUT = 0.7
 
-# Start verification (more debug, verify started)
-START_VERIFY_TIMEOUT_SECONDS = 8.0
+# Start verification
+START_VERIFY_TIMEOUT_SECONDS = 20.0
 START_VERIFY_INTERVAL_SECONDS = 0.5
 
 # Log game status from the web every time we poll (even if unchanged)
@@ -83,9 +83,10 @@ log = logging.getLogger("AutoStream")
 # -------------------------
 @dataclass(frozen=True)
 class GamePlan:
+    plan_id: str               # UNIQUE per CSV entry (fixes repeated Game_ID tests)
     liga: str
     short_title: str
-    game_id: str
+    game_id: str               # Used for Unihockey API
     game_start: datetime
     start_time: datetime
     stop_time: datetime
@@ -160,15 +161,8 @@ def companion_get_custom_var(name: str) -> Optional[str]:
 
 
 def companion_set_custom_var(name: str, value: str) -> bool:
-    """
-    Set a Companion custom variable using the documented query-param method:
-      POST /api/custom-variable/<name>/value?value=<value>
-
-    Works with empty strings too (sends ...?value=).
-    """
     url = f"http://{COMPANION_IP}:{COMPANION_PORT}/api/custom-variable/{name}/value"
 
-    # Required debug log line: how we update the variable
     log.info(
         "COMPANION SET: $(custom:%s) <= %d chars (%d lines) via POST query-param",
         name,
@@ -179,7 +173,6 @@ def companion_set_custom_var(name: str, value: str) -> bool:
     log.info("COMPANION SET VALUE (repr): %r", value)
 
     try:
-        # params handles URL encoding and keeps empty value as "value="
         r = _session.post(
             url,
             params={"value": value},
@@ -222,10 +215,7 @@ def companion_get_flags_and_health() -> Tuple[int, int, bool, str]:
 # GAME LIST (TODAY)
 # -------------------------
 def build_game_list_today_value(plans: List[GamePlan], today_local: date) -> str:
-    """
-    newline-separated league names ("liga") for all games whose game_start is today (local TZ).
-    Duplicates are kept (one line per game).
-    """
+    # Plans already filtered to only those with stream info
     todays = [p.liga for p in plans if p.game_start.date() == today_local]
     return "\n".join(todays)
 
@@ -250,6 +240,8 @@ def load_game_plans(path: str, sep: str, tz: ZoneInfo) -> List[GamePlan]:
         raise FileNotFoundError(path)
 
     plans: List[GamePlan] = []
+    skipped_missing_stream = 0
+
     with p.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.reader(f, delimiter=sep)
         for row in reader:
@@ -273,8 +265,17 @@ def load_game_plans(path: str, sep: str, tz: ZoneInfo) -> List[GamePlan]:
 
             server, key = parse_stream_details(details)
 
+            # Ignore games without complete stream info
+            if not (server and key):
+                skipped_missing_stream += 1
+                continue
+
+            # IMPORTANT: plan_id must be unique even if Game_ID repeats (e.g. your tests!)
+            plan_id = f"{game_id}|{start_time.isoformat()}"
+
             plans.append(
                 GamePlan(
+                    plan_id=plan_id,
                     liga=liga,
                     short_title=short_title,
                     game_id=game_id,
@@ -287,6 +288,10 @@ def load_game_plans(path: str, sep: str, tz: ZoneInfo) -> List[GamePlan]:
             )
 
     plans.sort(key=lambda x: x.start_time)
+
+    if skipped_missing_stream:
+        log.info("CSV filter: skipped %d row(s) missing Stream URL and/or Stream key", skipped_missing_stream)
+
     return plans
 
 
@@ -321,28 +326,18 @@ class OBSController:
         self.client.stop_record()
 
 
-def connect_obs_with_retry() -> OBSController:
-    """
-    Connect to OBS. If not reachable, log and retry after 10 minutes.
-    """
-    while True:
-        try:
-            log.info("Connecting to OBS %s:%s ...", OBS_HOST, OBS_PORT)
-            obsctl = OBSController()
-            obsctl.get_status()  # test call
-            log.info("OBS connection established")
-            log.info("")
-            return obsctl
-        except Exception as e:
-            log.error(
-                "OBS host %s:%s not reachable (%s). Retrying in %d minutes.",
-                OBS_HOST,
-                OBS_PORT,
-                e,
-                OBS_RETRY_SECONDS // 60,
-            )
-            log.info("")
-            time.sleep(OBS_RETRY_SECONDS)
+def try_connect_obs() -> Optional[OBSController]:
+    try:
+        log.info("Connecting to OBS %s:%s ...", OBS_HOST, OBS_PORT)
+        obsctl = OBSController()
+        obsctl.get_status()  # test call
+        log.info("OBS connection established")
+        log.info("")
+        return obsctl
+    except Exception as e:
+        log.warning("OBS not reachable (%s). Will retry later.", e)
+        log.info("")
+        return None
 
 
 def wait_for_obs_output(
@@ -399,10 +394,13 @@ def fetch_game_status(game_id: str) -> Optional[str]:
 # SCHEDULE
 # -------------------------
 def find_active_plan(plans: List[GamePlan], now: datetime) -> Optional[GamePlan]:
-    for p in plans:
-        if p.start_time <= now < p.stop_time:
-            return p
-    return None
+    """
+    If multiple plans overlap, pick the one that started most recently.
+    """
+    active = [p for p in plans if p.start_time <= now < p.stop_time]
+    if not active:
+        return None
+    return max(active, key=lambda p: p.start_time)
 
 
 def upcoming_plans(plans: List[GamePlan], now: datetime, n: int) -> List[GamePlan]:
@@ -420,10 +418,11 @@ def log_upcoming(plans: List[GamePlan], now: datetime, n: int) -> None:
         has_url = "yes" if p.stream_server else "no"
         has_key = "yes" if p.stream_key else "no"
         log.info(
-            "UPCOMING #%d: %s %s (Game_ID=%s) start=%s (in %s) stop=%s url=%s key=%s",
+            "UPCOMING #%d: %s %s (Plan_ID=%s Game_ID=%s) start=%s (in %s) stop=%s url=%s key=%s",
             i,
             p.liga,
             p.short_title,
+            p.plan_id,
             p.game_id,
             fmt_dt(p.start_time),
             fmt_td(secs_to),
@@ -447,28 +446,33 @@ def main():
         OBS_PORT,
         OBS_SCENE,
     )
-    log.info("NOTE: Game_List_Today updates only after CSV is loaded (CSV loads only when OBS is idle).")
+    log.info("NOTE: Script runs even if OBS is down; Companion will still be updated.")
+    log.info("NOTE: CSV reload is allowed when OBS is down; when OBS is up it reloads only when OBS is idle.")
     log.info("")
 
-    obsctl = connect_obs_with_retry()
+    obsctl: Optional[OBSController] = None
+    last_obs_connect_try = 0.0
 
     plans: List[GamePlan] = []
     last_csv_reload = 0.0
     last_csv_mtime = 0.0
+    force_csv_reload = False
 
     last_stream_auto: Optional[int] = None
     last_record_auto: Optional[int] = None
 
+    # IMPORTANT: attempts keyed by plan_id, not game_id
     stream_start_attempts: Dict[str, int] = {}
     record_start_attempts: Dict[str, int] = {}
     MAX_START_ATTEMPTS = 1
 
-    controlled_game_id: Optional[str] = None
+    # Track which plan we are controlling
+    controlled_plan: Optional[GamePlan] = None
 
-    stop_enforced_for_game_id: Optional[str] = None
+    # Early-stop tracking (per game_id is fine)
     early_stop_done_for_game_id: Optional[str] = None
 
-    last_active_game_id: Optional[str] = None
+    last_active_plan_id: Optional[str] = None
 
     last_game_status_check = 0.0
     game_status_cache: Dict[str, Optional[str]] = {}
@@ -476,7 +480,6 @@ def main():
     last_is_streaming: Optional[bool] = None
     last_is_recording: Optional[bool] = None
 
-    # Game list tracking (must still send empty on first run)
     last_sent_game_list_today: Optional[str] = None
     last_seen_local_date: date = datetime.now(tz=tz).date()
 
@@ -486,28 +489,55 @@ def main():
     while True:
         now = datetime.now(tz=tz)
 
-        # Day rollover: force resend
+        # Day rollover: behave like restart (no games cross midnight)
         if now.date() != last_seen_local_date:
+            log.info("DAY ROLLOVER: %s -> %s (resetting state like restart)", last_seen_local_date, now.date())
             last_seen_local_date = now.date()
+
             last_sent_game_list_today = None
 
-        # OBS status
-        try:
-            is_streaming, is_recording = obsctl.get_status()
-        except Exception as e:
-            log.error(
-                "OBS host %s:%s not reachable (%s). Retrying in %d minutes.",
-                OBS_HOST,
-                OBS_PORT,
-                e,
-                OBS_RETRY_SECONDS // 60,
-            )
+            plans = []
+            last_csv_reload = 0.0
+            last_csv_mtime = 0.0
+
+            stream_start_attempts.clear()
+            record_start_attempts.clear()
+
+            controlled_plan = None
+            early_stop_done_for_game_id = None
+            last_active_plan_id = None
+
+            last_game_status_check = 0.0
+            game_status_cache.clear()
+
+            force_csv_reload = True
             log.info("")
-            time.sleep(OBS_RETRY_SECONDS)
-            obsctl = connect_obs_with_retry()
-            last_is_streaming = None
-            last_is_recording = None
-            continue
+
+        # -------------------------
+        # OBS connect/reconnect (NON-BLOCKING)
+        # -------------------------
+        if obsctl is None:
+            if (time.time() - last_obs_connect_try) >= OBS_RETRY_SECONDS or last_obs_connect_try == 0.0:
+                last_obs_connect_try = time.time()
+                obsctl = try_connect_obs()
+                if obsctl is None:
+                    is_streaming, is_recording = False, False
+                else:
+                    last_is_streaming = None
+                    last_is_recording = None
+                    is_streaming, is_recording = obsctl.get_status()
+            else:
+                is_streaming, is_recording = False, False
+        else:
+            try:
+                is_streaming, is_recording = obsctl.get_status()
+            except Exception as e:
+                log.error("OBS connection lost (%s). Will retry in %d minutes.", e, OBS_RETRY_SECONDS // 60)
+                log.info("")
+                obsctl = None
+                last_is_streaming = None
+                last_is_recording = None
+                is_streaming, is_recording = False, False
 
         # OBS output state log
         if last_is_streaming is None or last_is_recording is None:
@@ -521,7 +551,9 @@ def main():
 
         obs_idle = (not is_streaming) and (not is_recording)
 
-        # CSV reload when idle
+        # -------------------------
+        # CSV reload
+        # -------------------------
         try:
             p = Path(STREAM_PLANNING_FILE)
             mtime = p.stat().st_mtime if p.exists() else 0.0
@@ -529,17 +561,22 @@ def main():
             mtime = 0.0
 
         csv_reloaded_this_loop = False
+        allow_csv_reload = force_csv_reload or (obsctl is None) or obs_idle
 
-        if obs_idle:
+        if allow_csv_reload:
             due_time = (time.time() - last_csv_reload) >= CSV_RELOAD_IDLE_EVERY_SECONDS
             due_mtime = (mtime != 0.0 and mtime != last_csv_mtime)
-            if due_time or due_mtime or not plans:
+            do_reload = force_csv_reload or due_time or due_mtime or not plans
+
+            if do_reload:
                 try:
+                    reason = "forced reload" if force_csv_reload else ("mtime change" if due_mtime else "timer/initial")
                     plans = load_game_plans(STREAM_PLANNING_FILE, CSV_SEPARATOR, tz)
                     last_csv_reload = time.time()
                     last_csv_mtime = mtime
                     csv_reloaded_this_loop = True
-                    reason = "mtime change" if due_mtime else "timer/initial"
+                    force_csv_reload = False
+
                     log.info("CSV loaded: %d rows (%s)", len(plans), reason)
                     log_upcoming(plans, now, UPCOMING_LIST_COUNT)
                     log.info("")
@@ -547,8 +584,10 @@ def main():
                     log.error("CSV load failed: %s", e)
                     log.info("")
 
-        # Update Game_List_Today after CSV load (or day-change forced resend)
-        if plans and (csv_reloaded_this_loop or last_sent_game_list_today is None):
+        # -------------------------
+        # Update Game_List_Today
+        # -------------------------
+        if csv_reloaded_this_loop or last_sent_game_list_today is None:
             today_value = build_game_list_today_value(plans, now.date())
 
             log.info("Preparing $(custom:%s) for local date %s", COMPANION_VAR_GAME_LIST_TODAY, now.date().isoformat())
@@ -557,9 +596,7 @@ def main():
             log.info("%s", today_value if today_value else "(empty)")
             log.info("---- END   Game_List_Today ----")
 
-            # IMPORTANT: send even if empty on first run (None) or if changed
             should_send = (last_sent_game_list_today is None) or (today_value != last_sent_game_list_today)
-
             if should_send:
                 ok = companion_set_custom_var(COMPANION_VAR_GAME_LIST_TODAY, today_value)
                 if ok:
@@ -569,7 +606,9 @@ def main():
                 log.info("$(custom:%s) unchanged -> no update sent", COMPANION_VAR_GAME_LIST_TODAY)
                 log.info("")
 
+        # -------------------------
         # Companion flags
+        # -------------------------
         stream_auto, record_auto, companion_ok, companion_err = companion_get_flags_and_health()
 
         if _last_companion_ok is None or companion_ok != _last_companion_ok or (
@@ -602,23 +641,25 @@ def main():
             )
             log.info("")
 
-        # Active plan
+        # -------------------------
+        # Active plan (overlap-safe)
+        # -------------------------
         active = find_active_plan(plans, now) if plans else None
 
-        current_active_game_id = active.game_id if active else None
-        if current_active_game_id != last_active_game_id:
-            last_active_game_id = current_active_game_id
+        current_active_plan_id = active.plan_id if active else None
+        if current_active_plan_id != last_active_plan_id:
+            last_active_plan_id = current_active_plan_id
 
             if active:
                 log.info(
-                    "ACTIVE WINDOW: %s %s (Game_ID=%s) %s -> %s",
+                    "ACTIVE WINDOW: %s %s (Plan_ID=%s Game_ID=%s) %s -> %s",
                     active.liga,
                     active.short_title,
+                    active.plan_id,
                     active.game_id,
                     fmt_dt(active.start_time),
                     fmt_dt(active.stop_time),
                 )
-                stop_enforced_for_game_id = None
                 early_stop_done_for_game_id = None
                 game_status_cache.pop(active.game_id, None)
                 log_upcoming(plans, now, UPCOMING_LIST_COUNT)
@@ -628,46 +669,83 @@ def main():
                 log_upcoming(plans, now, UPCOMING_LIST_COUNT)
                 log.info("")
 
-        # Scheduled stop
+        # -------------------------
+        # HANDOVER (robust)
+        # Compare by plan_id, not game_id
+        # -------------------------
         if (
             active
-            and controlled_game_id == active.game_id
-            and now >= active.stop_time
-            and stop_enforced_for_game_id != active.game_id
-        ):
-            if is_streaming or is_recording:
-                log.info("STOP TIME reached for Game_ID=%s -> stopping stream+record", active.game_id)
-                try:
-                    if is_streaming:
-                        obsctl.stop_stream()
-                    if is_recording:
-                        obsctl.stop_record()
-                    is_streaming, is_recording = wait_for_obs_output(
-                        obsctl,
-                        want_streaming=False if is_streaming else None,
-                        want_recording=False if is_recording else None,
-                    )
-                    log.info(
-                        "OBS outputs stopped (verified): streaming=%s recording=%s",
-                        onoff(is_streaming),
-                        onoff(is_recording),
-                    )
-                except Exception as e:
-                    log.error("Failed to stop OBS outputs: %s", e)
-                log.info("")
-            stop_enforced_for_game_id = active.game_id
-
-        # Early stop FINISHED
-        if (
-            active
-            and controlled_game_id == active.game_id
+            and obsctl is not None
             and (is_streaming or is_recording)
-            and now < active.stop_time
+            and (stream_auto == 1 or record_auto == 1)
+            and (controlled_plan is None or controlled_plan.plan_id != active.plan_id)
         ):
+            prev_id = controlled_plan.plan_id if controlled_plan else "(unknown)"
+            log.info(
+                "HANDOVER: switching control %s -> %s. Stopping outputs for clean restart.",
+                prev_id,
+                active.plan_id,
+            )
+            try:
+                if is_streaming:
+                    obsctl.stop_stream()
+                if is_recording:
+                    obsctl.stop_record()
+
+                is_streaming, is_recording = wait_for_obs_output(
+                    obsctl,
+                    want_streaming=False if is_streaming else None,
+                    want_recording=False if is_recording else None,
+                )
+                log.info(
+                    "HANDOVER stop verified: streaming=%s recording=%s",
+                    onoff(is_streaming),
+                    onoff(is_recording),
+                )
+            except Exception as e:
+                log.error("HANDOVER stop failed: %s", e)
+
+            log.info("")
+            controlled_plan = None
+
+        # -------------------------
+        # Scheduled stop for the CONTROLLED plan
+        # -------------------------
+        if controlled_plan and obsctl is not None and (is_streaming or is_recording) and now >= controlled_plan.stop_time:
+            log.info(
+                "STOP TIME reached for CONTROLLED Plan_ID=%s -> stopping stream+record (stop=%s)",
+                controlled_plan.plan_id,
+                fmt_dt(controlled_plan.stop_time),
+            )
+            try:
+                if is_streaming:
+                    obsctl.stop_stream()
+                if is_recording:
+                    obsctl.stop_record()
+                is_streaming, is_recording = wait_for_obs_output(
+                    obsctl,
+                    want_streaming=False if is_streaming else None,
+                    want_recording=False if is_recording else None,
+                )
+                log.info(
+                    "OBS outputs stopped (verified): streaming=%s recording=%s",
+                    onoff(is_streaming),
+                    onoff(is_recording),
+                )
+            except Exception as e:
+                log.error("Failed to stop OBS outputs: %s", e)
+            log.info("")
+            controlled_plan = None
+
+        # -------------------------
+        # Early stop FINISHED (for the CONTROLLED plan)
+        # (game_id based)
+        # -------------------------
+        if controlled_plan and obsctl is not None and (is_streaming or is_recording) and now < controlled_plan.stop_time:
             if (time.time() - last_game_status_check) >= GAME_STATUS_CHECK_EVERY_SECONDS:
                 last_game_status_check = time.time()
 
-                status = fetch_game_status(active.game_id)
+                status = fetch_game_status(controlled_plan.game_id)
 
                 api_ok = status is not None
                 api_err = "" if api_ok else _last_api_err
@@ -680,32 +758,31 @@ def main():
                     _last_api_ok = api_ok
                     _last_api_err = api_err
 
-                prev = game_status_cache.get(active.game_id)
-                game_status_cache[active.game_id] = status
+                prev = game_status_cache.get(controlled_plan.game_id)
+                game_status_cache[controlled_plan.game_id] = status
 
                 if status:
                     if LOG_GAME_STATUS_EVERY_POLL:
                         if status == prev:
-                            log.info("Game status polled (unchanged): Game_ID=%s status=%s", active.game_id, status)
-                            log.info("")
+                            log.info(
+                                "Game status polled (unchanged): Game_ID=%s status=%s",
+                                controlled_plan.game_id,
+                                status,
+                            )
                         else:
                             log.info(
                                 "Game status polled (changed):   Game_ID=%s %s -> %s",
-                                active.game_id,
+                                controlled_plan.game_id,
                                 prev,
                                 status,
                             )
-                            log.info("")
-                    else:
-                        if status != prev:
-                            log.info("Game status update: Game_ID=%s status=%s", active.game_id, status)
-                            log.info("")
+                        log.info("")
 
-                if status == "FINISHED" and early_stop_done_for_game_id != active.game_id:
+                if status == "FINISHED" and early_stop_done_for_game_id != controlled_plan.game_id:
                     log.info(
                         "EARLY STOP: Game_ID=%s is FINISHED before scheduled stop (%s). Stopping stream+record.",
-                        active.game_id,
-                        fmt_dt(active.stop_time),
+                        controlled_plan.game_id,
+                        fmt_dt(controlled_plan.stop_time),
                     )
                     try:
                         if is_streaming:
@@ -725,85 +802,87 @@ def main():
                     except Exception as e:
                         log.error("Failed early stop of OBS outputs: %s", e)
                     log.info("")
-                    early_stop_done_for_game_id = active.game_id
+                    early_stop_done_for_game_id = controlled_plan.game_id
+                    controlled_plan = None
 
+        # -------------------------
         # Start logic
-        if active:
-            try:
-                obsctl.set_scene(OBS_SCENE)
-            except Exception as e:
-                log.error("Failed to set scene %r: %s", OBS_SCENE, e)
-
+        # Attempts keyed by plan_id (fix)
+        # -------------------------
+        if active and obsctl is not None:
             # STREAM
             if (
                 stream_auto == 1
-                and (stream_start_attempts.get(active.game_id, 0) < MAX_START_ATTEMPTS)
+                and (stream_start_attempts.get(active.plan_id, 0) < MAX_START_ATTEMPTS)
                 and not is_streaming
             ):
-                stream_start_attempts[active.game_id] = stream_start_attempts.get(active.game_id, 0) + 1
+                stream_start_attempts[active.plan_id] = stream_start_attempts.get(active.plan_id, 0) + 1
 
-                if not (active.stream_server and active.stream_key):
-                    log.warning(
-                        "Stream_Auto=ON but missing Stream URL and/or Stream key for Game_ID=%s",
+                try:
+                    log.info(
+                        "AUTO START: STREAM (attempt %d/%d) Plan_ID=%s Game_ID=%s",
+                        stream_start_attempts[active.plan_id],
+                        MAX_START_ATTEMPTS,
+                        active.plan_id,
                         active.game_id,
                     )
-                    log.info("")
-                else:
-                    try:
+                    log.info("  Pre-check: streaming=%s recording=%s", onoff(is_streaming), onoff(is_recording))
+
+                    log.info("  Setting scene=%r", OBS_SCENE)
+                    obsctl.set_scene(OBS_SCENE)
+
+                    log.info("  Setting RTMP: server=%s key=%s", active.stream_server, mask_key(active.stream_key))
+                    obsctl.set_rtmp_destination(active.stream_server, active.stream_key)
+
+                    log.info("  Waiting %.1fs after setting RTMP...", WAIT_AFTER_SET_RTMP_SECONDS)
+                    time.sleep(WAIT_AFTER_SET_RTMP_SECONDS)
+
+                    log.info("  Calling start_stream() ...")
+                    obsctl.start_stream()
+
+                    is_streaming2, is_recording2 = wait_for_obs_output(obsctl, want_streaming=True, want_recording=None)
+                    if is_streaming2:
                         log.info(
-                            "AUTO START: STREAM (attempt %d/%d) Game_ID=%s",
-                            stream_start_attempts[active.game_id],
-                            MAX_START_ATTEMPTS,
-                            active.game_id,
+                            "  Streaming started (verified). streaming=%s recording=%s",
+                            onoff(is_streaming2),
+                            onoff(is_recording2),
                         )
-                        log.info("  Pre-check: streaming=%s recording=%s", onoff(is_streaming), onoff(is_recording))
-                        log.info("  Setting scene=%r", OBS_SCENE)
-                        log.info("  Setting RTMP: server=%s key=%s", active.stream_server, mask_key(active.stream_key))
-
-                        obsctl.set_rtmp_destination(active.stream_server, active.stream_key)
-                        log.info("  Waiting %.1fs after setting RTMP...", WAIT_AFTER_SET_RTMP_SECONDS)
-                        time.sleep(WAIT_AFTER_SET_RTMP_SECONDS)
-
-                        log.info("  Calling start_stream() ...")
-                        obsctl.start_stream()
-
-                        is_streaming2, is_recording2 = wait_for_obs_output(obsctl, want_streaming=True, want_recording=None)
-                        if is_streaming2:
-                            log.info(
-                                "  Streaming started (verified). streaming=%s recording=%s",
-                                onoff(is_streaming2),
-                                onoff(is_recording2),
-                            )
-                            controlled_game_id = active.game_id
-                        else:
-                            log.error(
-                                "  Streaming did NOT become active within %.1fs. Last seen: streaming=%s recording=%s",
-                                START_VERIFY_TIMEOUT_SECONDS,
-                                onoff(is_streaming2),
-                                onoff(is_recording2),
-                            )
-                        log.info("")
-                    except Exception as e:
-                        log.error("Failed to start streaming: %s", e)
-                        log.info("")
+                        controlled_plan = active
+                        early_stop_done_for_game_id = None
+                    else:
+                        log.error(
+                            "  Streaming did NOT become active within %.1fs. Last seen: streaming=%s recording=%s",
+                            START_VERIFY_TIMEOUT_SECONDS,
+                            onoff(is_streaming2),
+                            onoff(is_recording2),
+                        )
+                    log.info("")
+                    is_streaming, is_recording = is_streaming2, is_recording2
+                except Exception as e:
+                    log.error("Failed to start streaming: %s", e)
+                    log.info("")
 
             # RECORD
             if (
                 record_auto == 1
-                and (record_start_attempts.get(active.game_id, 0) < MAX_START_ATTEMPTS)
+                and (record_start_attempts.get(active.plan_id, 0) < MAX_START_ATTEMPTS)
                 and not is_recording
             ):
-                record_start_attempts[active.game_id] = record_start_attempts.get(active.game_id, 0) + 1
+                record_start_attempts[active.plan_id] = record_start_attempts.get(active.plan_id, 0) + 1
 
                 try:
                     log.info(
-                        "AUTO START: RECORD (attempt %d/%d) Game_ID=%s",
-                        record_start_attempts[active.game_id],
+                        "AUTO START: RECORD (attempt %d/%d) Plan_ID=%s Game_ID=%s",
+                        record_start_attempts[active.plan_id],
                         MAX_START_ATTEMPTS,
+                        active.plan_id,
                         active.game_id,
                     )
                     log.info("  Pre-check: streaming=%s recording=%s", onoff(is_streaming), onoff(is_recording))
+
                     log.info("  Setting scene=%r", OBS_SCENE)
+                    obsctl.set_scene(OBS_SCENE)
+
                     log.info("  Calling start_record() ...")
                     obsctl.start_record()
 
@@ -814,7 +893,9 @@ def main():
                             onoff(is_streaming2),
                             onoff(is_recording2),
                         )
-                        controlled_game_id = active.game_id
+                        if controlled_plan is None:
+                            controlled_plan = active
+                        early_stop_done_for_game_id = None
                     else:
                         log.error(
                             "  Recording did NOT become active within %.1fs. Last seen: streaming=%s recording=%s",
@@ -823,15 +904,16 @@ def main():
                             onoff(is_recording2),
                         )
                     log.info("")
+                    is_streaming, is_recording = is_streaming2, is_recording2
                 except Exception as e:
                     log.error("Failed to start recording: %s", e)
                     log.info("")
 
-        # Release control if no active window
-        if not active and controlled_game_id is not None:
-            log.info("CONTROLLED GAME cleared (no active window). Was Game_ID=%s", controlled_game_id)
+        # If no active window, release control
+        if not active and controlled_plan is not None:
+            log.info("CONTROLLED PLAN cleared (no active window). Was Plan_ID=%s", controlled_plan.plan_id)
             log.info("")
-            controlled_game_id = None
+            controlled_plan = None
 
         time.sleep(MAIN_LOOP_SECONDS)
 
