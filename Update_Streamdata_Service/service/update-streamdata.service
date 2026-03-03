@@ -1,0 +1,15 @@
+[Unit]
+Description=Update Streamdata (Run Once)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/scoreboard/Update_Streamdata_Service
+
+# CHANGE THIS PATH IF NEEDED
+#ExecStart=/usr/bin/python3 /home/administrator/Unihockey_Scripts/Update_Streamdata_Service/update_xml_file.py
+ExecStart=/usr/bin/python3 /opt/scoreboard/Update_Streamdata_Service/update_xml_file.py
+
+StandardOutput=journal
+StandardError=journal

@@ -3,6 +3,8 @@
 ## scoreboard.service
 Modify service: sudo nano /etc/systemd/system/auto_stream.service
 
+- Reload service config after change: systemctl daemon-reload
+
 ## Disable autostart
 sudo systemctl disable auto_stream.service
 

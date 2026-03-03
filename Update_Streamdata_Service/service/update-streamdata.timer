@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Streamdata Updater at Boot + Daily 06:00
+
+[Timer]
+OnBootSec=5min
+OnCalendar=*-*-* 06:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
