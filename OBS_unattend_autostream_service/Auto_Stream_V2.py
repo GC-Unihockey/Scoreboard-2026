@@ -32,8 +32,8 @@ STREAM_PLANNING_FILE = "/mnt/One_Drive/01_GC_Streaming_Sharing/Stream_Planning.c
 CSV_SEPARATOR = ";"  # can be "," or ";"
 
 # Timing (minutes)
-LEAD_MINUTES = 5 #25
-DURATION_MINUTES = 5 #150
+LEAD_MINUTES = 25 #25
+DURATION_MINUTES = 180 #150
 
 # Reload CSV only when OBS is idle (unless OBS is down/unreachable)
 CSV_RELOAD_IDLE_EVERY_SECONDS = 5 * 60
