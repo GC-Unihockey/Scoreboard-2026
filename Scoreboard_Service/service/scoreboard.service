@@ -1,0 +1,30 @@
+[Unit]
+Description=Scoreboard Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=administrator
+Group=administrator
+#WorkingDirectory=/home/administrator/Unihockey_Scripts/Scoreboard_Service
+WorkingDirectory=/usr/local/bin
+
+# System Python (no venv)
+#ExecStart=/usr/bin/python3 /home/administrator/Unihockey_Scripts/Scoreboard_Service/main_live.py
+#ExecStart=/usr/bin/python3 /home/administrator/Unihockey_Scripts/Scoreboard_Service/main_simulator.py
+ExecStart=/usr/local/bin/Scoreboard_Service.sh
+
+
+Restart=always
+RestartSec=2
+
+# Clean shutdown (SIGINT like Ctrl+C)
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
