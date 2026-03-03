@@ -1,0 +1,24 @@
+[Unit]
+Description=Auto Stream Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=administrator
+Group=administrator
+WorkingDirectory=/opt/scoreboard/OBS_unattend_autostream_service
+ExecStart=/usr/bin/python3 /opt/scoreboard/OBS_unattend_autostream_service/auto_stream.py
+
+Restart=always
+RestartSec=2
+
+# Clean shutdown (SIGINT like Ctrl+C)
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
