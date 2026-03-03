@@ -35,6 +35,9 @@ StandardError=journal
 WantedBy=multi-user.target
 ```
 
+- Reload service config after change: systemctl daemon-reload
+
+## Log
 - Check log (currently logged to Journal): 
   
   ```
