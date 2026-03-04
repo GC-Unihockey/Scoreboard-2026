@@ -48,7 +48,7 @@ class NDIConfig:
     source_name: str = "Scoreboard NDI"
     width: int = 1920
     height: int = 1080
-    fps: int = 50
+    fps: int = 10
 
 
 class NDIScoreboardOutput:
@@ -130,8 +130,8 @@ class NDIScoreboardOutput:
         img = np.zeros((h, w, 4), dtype=np.uint8)  # BGRA
 
         # Text nudges
-        TEXT_Y_OFFSET = 10      # global: names/clock/penalties/period
-        SCORE_Y_OFFSET = 6     # extra drop for score digits only
+        TEXT_Y_OFFSET = 13      # global: names/clock/penalties/period
+        SCORE_Y_OFFSET = 2     # extra drop for score digits only
 
         # Colors (BGRA)
         #DARK2 = (25, 20, 45, 255)
