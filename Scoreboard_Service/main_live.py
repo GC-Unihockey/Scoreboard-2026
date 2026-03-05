@@ -6,8 +6,11 @@ import serial
 ENABLE_NDI = True  # set True to enable NDI output
 NDI_SOURCE_NAME = "Scoreboard"
 NDI_WIDTH = 1920
-NDI_HEIGHT = 1080
-NDI_FPS = 50
+NDI_HEIGHT = 250
+NDI_FPS = 5
+
+# UI-only scale: makes the graphic bigger/smaller INSIDE the same 1920x200 frame
+NDI_UI_SCALE = 1.6  # try 1.4, 1.6, 1.8, 2.0
 
 if ENABLE_NDI:
     from outputs.ndi_scoreboard import NDIScoreboardOutput, NDIConfig
@@ -46,13 +49,15 @@ if ENABLE_NDI:
             source_name=NDI_SOURCE_NAME,
             width=NDI_WIDTH,
             height=NDI_HEIGHT,
-            fps=NDI_FPS
+            fps=NDI_FPS,
+            ui_scale=NDI_UI_SCALE,   # <-- THIS is the new part
         )
         ndi = NDIScoreboardOutput(ndi_cfg)
         threading.Thread(target=ndi.run, args=(lambda: state,), daemon=True).start()
         print("[NDI] Started:", NDI_SOURCE_NAME)
     except Exception as e:
         print(f"[NDI] Failed to start: {e}")
+
 print("[Live] Running. Open http://localhost:8080/state")
 
 while True:
