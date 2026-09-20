@@ -19,6 +19,12 @@ GOAL_CHANCE_PER_GAME_SECOND = 1.0 / 45.0  # on avg ~1 goal per 45s per team (cap
 PENALTY_CHANCE_PER_GAME_SECOND = 1.0 / 60.0  # on avg ~1 penalty per minute per team (capped by slots)
 PENALTY_LENGTHS = [120, 120]  # 2:00 or 5:00 (game seconds)
 
+# game stoppages (game seconds; sped up by SIM_SPEED like everything else)
+# During a stoppage the clock and penalty timers stand still and clock_running is 0.
+PAUSE_EVERY_S = (60, 180)     # random pause after 1-3 game minutes of running play
+PAUSE_LENGTH_S = (10, 45)     # random pause length
+GOAL_PAUSE_S = 30             # every goal stops the game for this long
+
 def _build_T(sport: int, pnu: int) -> bytes:
     # parse_time reads msg[18]=SPORT, msg[19]=PNU after stripping 'T'
     blob = list(" " * 26)
@@ -53,6 +59,18 @@ def _build_C(home_timers, away_timers) -> bytes:
 
 def _build_N(home: str, away: str) -> bytes:
     return b"N" + home.ljust(12).encode("ascii") + away.ljust(12).encode("ascii")
+
+def _frame_chunks(sport, pnu, clock, hs, as_, toh, tov, per, running, horn, home_pens, away_pens):
+    """T + D + C frames for one tick, chunked like a serial stream."""
+    payloads = [
+        _build_T(sport, pnu),
+        _build_D(clock, hs, as_, toh, tov, per, running, horn),
+        _build_C(home_pens, away_pens),
+    ]
+    wire = b"".join(make_frame(p) for p in payloads)
+    yield wire[:13]
+    yield wire[13:57]
+    yield wire[57:]
 
 def _decrement_list(timers, dt=1):
     for i in range(len(timers)):
@@ -99,19 +117,24 @@ def generate_stream():
 
         # Period running
         game_sec = 0
+        next_pause_at = random.randint(*PAUSE_EVERY_S)
         while game_sec <= PERIOD_SECONDS:
             # At the end (20:00), pulse horn and stop.
             horn = (game_sec == PERIOD_SECONDS)
             running = (game_sec < PERIOD_SECONDS)
+            pause_s = 0   # >0: the game stops with this frame for that many game seconds
 
             # scoring while running
             if running:
+                goal = False
                 if home_p < MAX_GOALS_PER_TEAM_PER_PERIOD and random.random() < GOAL_CHANCE_PER_GAME_SECOND:
                     home_p += 1
                     total_home += 1
+                    goal = True
                 if away_p < MAX_GOALS_PER_TEAM_PER_PERIOD and random.random() < GOAL_CHANCE_PER_GAME_SECOND:
                     away_p += 1
                     total_away += 1
+                    goal = True
 
                 # penalties while running
                 if random.random() < PENALTY_CHANCE_PER_GAME_SECOND:
@@ -122,26 +145,29 @@ def generate_stream():
                 _decrement_list(home_pens, 1)
                 _decrement_list(away_pens, 1)
 
+                if goal:
+                    pause_s = GOAL_PAUSE_S
+                elif game_sec >= next_pause_at and game_sec < PERIOD_SECONDS:
+                    pause_s = random.randint(*PAUSE_LENGTH_S)
+                    next_pause_at = game_sec + random.randint(*PAUSE_EVERY_S)   # goals don't reset this
+
             mm = game_sec // 60
             ss = game_sec % 60
             clock = f"{mm:02d}:{ss:02d}"  # counts UP
 
-            payloads = [
-                _build_T(sport, period),  # PNU=period
-                _build_D(clock, total_home, total_away, toh, tov, str(period), running, horn),
-                _build_C(home_pens, away_pens),
-            ]
-            wire = b"".join(make_frame(p) for p in payloads)
-
-            # Chunk it like serial might
-            yield wire[:13]
-            yield wire[13:57]
-            yield wire[57:]
+            yield from _frame_chunks(sport, period, clock, total_home, total_away, toh, tov,
+                                     str(period), running and pause_s == 0, horn, home_pens, away_pens)
 
             if game_sec == PERIOD_SECONDS:
                 # hold horn frame briefly
                 time.sleep(2 * TICK_REAL)
             else:
+                time.sleep(TICK_REAL)
+
+            # stoppage: same clock, clock stopped, penalty timers frozen, score already updated
+            for _ in range(max(0, pause_s - 1)):
+                yield from _frame_chunks(sport, period, clock, total_home, total_away, toh, tov,
+                                         str(period), False, False, home_pens, away_pens)
                 time.sleep(TICK_REAL)
 
             game_sec += 1
