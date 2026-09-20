@@ -167,8 +167,10 @@ class UdpPublisher:
     def _check_host(self, requester_ip, host) -> str:
         text = requester_ip if host is None else host
         try:
+            if not isinstance(text, str):   # IPv4Address(5) would silently accept an int
+                raise ValueError
             addr = ipaddress.IPv4Address(text)
-        except (ValueError, TypeError):
+        except ValueError:
             raise SubscribeError(400, "host must be an IPv4 address (hostnames are not resolved)")
         if addr.is_multicast or addr.is_unspecified or addr == ipaddress.IPv4Address("255.255.255.255"):
             raise SubscribeError(400, "host must be a unicast address")
