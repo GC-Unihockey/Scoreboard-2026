@@ -40,7 +40,18 @@ buffer = bytearray()
 summary_calc = SummaryCalculator()
 vmix_main = VmixMainClient(vmix_main_HOST, vmix_main_PORT)
 
-threading.Thread(target=run_web, args=(state, 8080), daemon=True).start()
+# --- UDP push (optional): any failure here only disables the push, never the scoreboard ---
+udp = None
+try:
+    from outputs.udp_publisher import UdpPublisher
+    udp = UdpPublisher(state)
+    udp.start()
+    print("[UDP] Push publisher started (subscribe via POST /subscribe)")
+except Exception as e:
+    print(f"[UDP] Push disabled: {e!r}")
+    udp = None
+
+threading.Thread(target=run_web, args=(state, 8080, udp), daemon=True).start()
 
 # --- Start NDI output (optional) ---
 if ENABLE_NDI:
@@ -75,7 +86,8 @@ while True:
             if len(buffer) > 16384:
                 buffer = buffer[-16384:]
 
-            for payload in extract_frames(buffer):
+            frames = extract_frames(buffer)
+            for payload in frames:
                 t = payload[:1]
                 if t == b"N":
                     parse_names(payload, state)
@@ -88,6 +100,12 @@ while True:
 
             if summary_calc.update(state):
                 vmix_main.update_pause_summary(state, vmix_main_pause_UID)
+
+            if frames and udp is not None:
+                try:
+                    udp.on_frame(state)
+                except Exception:
+                    pass
 
             vmix_main.update_scoreboard(state, vmix_main_scoreboard_UID)
             time.sleep(0.02)
