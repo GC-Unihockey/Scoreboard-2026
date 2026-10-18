@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import csv
 import re
+import threading
 import time
 import logging
 from dataclasses import dataclass
@@ -11,6 +12,8 @@ from typing import Optional, List, Tuple, Dict
 
 import requests
 import obsws_python as obs
+
+from status_web import StatusStore, run_web as run_status_web
 
 
 # -------------------------
@@ -69,6 +72,9 @@ START_VERIFY_INTERVAL_SECONDS = 0.5
 
 # Log game status from the web every time we poll (even if unchanged)
 LOG_GAME_STATUS_EVERY_POLL = True
+
+# Read-only HTML status page (local diagnostics)
+STATUS_WEB_PORT = 8081
 
 
 # -------------------------
@@ -234,7 +240,7 @@ def parse_stream_details(details: str) -> Tuple[Optional[str], Optional[str]]:
     return server, key
 
 
-def load_game_plans(path: str, sep: str, tz: ZoneInfo) -> List[GamePlan]:
+def load_game_plans(path: str, sep: str, tz: ZoneInfo) -> Tuple[List[GamePlan], int]:
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(path)
@@ -292,7 +298,7 @@ def load_game_plans(path: str, sep: str, tz: ZoneInfo) -> List[GamePlan]:
     if skipped_missing_stream:
         log.info("CSV filter: skipped %d row(s) missing Stream URL and/or Stream key", skipped_missing_stream)
 
-    return plans
+    return plans, skipped_missing_stream
 
 
 # -------------------------
@@ -408,6 +414,22 @@ def upcoming_plans(plans: List[GamePlan], now: datetime, n: int) -> List[GamePla
     return future[:n]
 
 
+def plan_to_status_dict(p: GamePlan, now: Optional[datetime] = None) -> Dict[str, object]:
+    d = {
+        "plan_id": p.plan_id,
+        "liga": p.liga,
+        "short_title": p.short_title,
+        "game_id": p.game_id,
+        "start_time": fmt_dt(p.start_time),
+        "stop_time": fmt_dt(p.stop_time),
+        "stream_server": p.stream_server,
+        "stream_key": p.stream_key,
+    }
+    if now is not None:
+        d["starts_in"] = fmt_td((p.start_time - now).total_seconds())
+    return d
+
+
 def log_upcoming(plans: List[GamePlan], now: datetime, n: int) -> None:
     up = upcoming_plans(plans, now, n)
     if not up:
@@ -450,12 +472,21 @@ def main():
     log.info("NOTE: CSV reload is allowed when OBS is down; when OBS is up it reloads only when OBS is idle.")
     log.info("")
 
+    status_store = StatusStore()
+    threading.Thread(target=run_status_web, args=(status_store, STATUS_WEB_PORT), daemon=True).start()
+    log.info("Status web page: http://0.0.0.0:%d/", STATUS_WEB_PORT)
+    log.info("")
+
+    process_start = datetime.now(tz=tz)
+
     obsctl: Optional[OBSController] = None
     last_obs_connect_try = 0.0
 
     plans: List[GamePlan] = []
     last_csv_reload = 0.0
     last_csv_mtime = 0.0
+    last_csv_reload_reason: Optional[str] = None
+    last_csv_skipped = 0
     force_csv_reload = False
 
     last_stream_auto: Optional[int] = None
@@ -571,9 +602,10 @@ def main():
             if do_reload:
                 try:
                     reason = "forced reload" if force_csv_reload else ("mtime change" if due_mtime else "timer/initial")
-                    plans = load_game_plans(STREAM_PLANNING_FILE, CSV_SEPARATOR, tz)
+                    plans, last_csv_skipped = load_game_plans(STREAM_PLANNING_FILE, CSV_SEPARATOR, tz)
                     last_csv_reload = time.time()
                     last_csv_mtime = mtime
+                    last_csv_reload_reason = reason
                     csv_reloaded_this_loop = True
                     force_csv_reload = False
 
@@ -914,6 +946,69 @@ def main():
             log.info("CONTROLLED PLAN cleared (no active window). Was Plan_ID=%s", controlled_plan.plan_id)
             log.info("")
             controlled_plan = None
+
+        # -------------------------
+        # Status snapshot (for the status web page)
+        # -------------------------
+        status_store.update({
+            "now": fmt_dt(now),
+            "process_started": fmt_dt(process_start),
+            "last_loop_at": fmt_dt(now),
+
+            "obs_connected": obsctl is not None,
+            "obs_host": OBS_HOST,
+            "obs_port": OBS_PORT,
+            "obs_scene": OBS_SCENE,
+            "is_streaming": is_streaming,
+            "is_recording": is_recording,
+
+            "companion_connected": companion_ok,
+            "companion_err": companion_err,
+            "companion_ip": COMPANION_IP,
+            "companion_port": COMPANION_PORT,
+            "stream_auto": bool(stream_auto),
+            "record_auto": bool(record_auto),
+            "auto_mode": auto_mode(stream_auto, record_auto),
+
+            "api_connected": _last_api_ok,
+            "api_err": _last_api_err,
+
+            "active_plan": plan_to_status_dict(active) if active else None,
+            "controlled_plan": plan_to_status_dict(controlled_plan) if controlled_plan else None,
+            "early_stop_done_for_game_id": early_stop_done_for_game_id,
+
+            "upcoming_plans": [
+                plan_to_status_dict(p, now) for p in upcoming_plans(plans, now, UPCOMING_LIST_COUNT)
+            ],
+
+            "csv_path": STREAM_PLANNING_FILE,
+            "csv_rows_loaded": len(plans),
+            "csv_rows_skipped": last_csv_skipped,
+            "csv_last_reload": fmt_dt(datetime.fromtimestamp(last_csv_reload, tz=tz)) if last_csv_reload else None,
+            "csv_last_reload_reason": last_csv_reload_reason,
+
+            "game_status_cache": dict(game_status_cache),
+            "last_game_status_check": (
+                fmt_dt(datetime.fromtimestamp(last_game_status_check, tz=tz)) if last_game_status_check else None
+            ),
+
+            "game_list_today": last_sent_game_list_today,
+
+            "stream_start_attempts": dict(stream_start_attempts),
+            "record_start_attempts": dict(record_start_attempts),
+            "max_start_attempts": MAX_START_ATTEMPTS,
+
+            "config": {
+                "lead_minutes": LEAD_MINUTES,
+                "duration_minutes": DURATION_MINUTES,
+                "main_loop_seconds": MAIN_LOOP_SECONDS,
+                "csv_reload_idle_every_seconds": CSV_RELOAD_IDLE_EVERY_SECONDS,
+                "game_status_check_every_seconds": GAME_STATUS_CHECK_EVERY_SECONDS,
+                "obs_retry_seconds": OBS_RETRY_SECONDS,
+                "start_verify_timeout_seconds": START_VERIFY_TIMEOUT_SECONDS,
+                "max_start_attempts": MAX_START_ATTEMPTS,
+            },
+        })
 
         time.sleep(MAIN_LOOP_SECONDS)
 
