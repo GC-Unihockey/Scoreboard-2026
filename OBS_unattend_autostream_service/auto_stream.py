@@ -628,15 +628,12 @@ def main():
             log.info("%s", today_value if today_value else "(empty)")
             log.info("---- END   Game_List_Today ----")
 
-            should_send = (last_sent_game_list_today is None) or (today_value != last_sent_game_list_today)
-            if should_send:
-                ok = companion_set_custom_var(COMPANION_VAR_GAME_LIST_TODAY, today_value)
-                if ok:
-                    last_sent_game_list_today = today_value
-                log.info("")
-            else:
-                log.info("$(custom:%s) unchanged -> no update sent", COMPANION_VAR_GAME_LIST_TODAY)
-                log.info("")
+            # Always resend here (not just on change): Companion can lose this value on its
+            # own restart, and comparing only against our own cache can't detect that drift.
+            ok = companion_set_custom_var(COMPANION_VAR_GAME_LIST_TODAY, today_value)
+            if ok:
+                last_sent_game_list_today = today_value
+            log.info("")
 
         # -------------------------
         # Companion flags
