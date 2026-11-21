@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import csv
-import re
 import threading
 import time
 import logging
@@ -98,10 +97,6 @@ class GamePlan:
     stop_time: datetime
     stream_server: Optional[str]
     stream_key: Optional[str]
-
-
-STREAM_URL_RE = re.compile(r"Stream\s*URL:\s*(\S+)", re.IGNORECASE)
-STREAM_KEY_RE = re.compile(r"Stream\s*key:\s*(\S+)", re.IGNORECASE)
 
 
 # -------------------------
@@ -229,17 +224,6 @@ def build_game_list_today_value(plans: List[GamePlan], today_local: date) -> str
 # -------------------------
 # CSV
 # -------------------------
-def parse_stream_details(details: str) -> Tuple[Optional[str], Optional[str]]:
-    d = (details or "").strip()
-    if not d:
-        return None, None
-    m_url = STREAM_URL_RE.search(d)
-    m_key = STREAM_KEY_RE.search(d)
-    server = m_url.group(1).strip() if m_url else None
-    key = m_key.group(1).strip() if m_key else None
-    return server, key
-
-
 def load_game_plans(path: str, sep: str, tz: ZoneInfo) -> Tuple[List[GamePlan], int]:
     p = Path(path)
     if not p.exists():
@@ -251,7 +235,7 @@ def load_game_plans(path: str, sep: str, tz: ZoneInfo) -> Tuple[List[GamePlan], 
     with p.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.reader(f, delimiter=sep)
         for row in reader:
-            if not row or len(row) < 6:
+            if not row or len(row) < 7:
                 continue
             if row[0].strip().lower() in ("liga", "league"):
                 continue
@@ -261,15 +245,14 @@ def load_game_plans(path: str, sep: str, tz: ZoneInfo) -> Tuple[List[GamePlan], 
             game_id = row[2].strip()
             date_s = row[3].strip()
             time_s = row[4].strip()
-            details = row[5].strip()
+            server = row[5].strip() or None
+            key = row[6].strip() or None
 
             dt_naive = datetime.strptime(f"{date_s} {time_s}", "%d.%m.%Y %H:%M:%S")
             game_start = dt_naive.replace(tzinfo=tz)
 
             start_time = game_start - timedelta(minutes=LEAD_MINUTES)
             stop_time = start_time + timedelta(minutes=DURATION_MINUTES)
-
-            server, key = parse_stream_details(details)
 
             # Ignore games without complete stream info
             if not (server and key):

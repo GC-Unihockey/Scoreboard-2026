@@ -74,12 +74,6 @@ def fmt_time(dt_local: datetime) -> str:
     return dt_local.strftime("%H:%M:%S")
 
 
-def default_stream_details() -> str:
-    if DEFAULT_STREAM_URL and DEFAULT_STREAM_KEY:
-        return f"Stream URL: {DEFAULT_STREAM_URL} Stream key: {DEFAULT_STREAM_KEY}"
-    return ""
-
-
 def should_skip_league(league_name: str) -> bool:
     code = liga_from_league_name(league_name).lower().strip("_")
     return code in SKIP_LEAGUE_CODES
@@ -114,7 +108,7 @@ def ensure_csv_header(csv_path: str, sep: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f, delimiter=sep)
-        w.writerow(["Liga", "Short_Title", "Game_ID", "Date", "Game_Start", "Stream_Details"])
+        w.writerow(["Liga", "Short_Title", "Game_ID", "Date", "Game_Start", "Stream_Server", "Stream_Key"])
     log.info("Created CSV with header")
 
 
@@ -189,7 +183,8 @@ def run_once():
             game_id,
             fmt_date_ch(dt_local),
             fmt_time(dt_local),
-            default_stream_details(),
+            DEFAULT_STREAM_URL,
+            DEFAULT_STREAM_KEY,
         ]
 
         new_rows.append(row)
